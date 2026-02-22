@@ -38,7 +38,7 @@ func (q *queue) Dequeue(id uint32) ([]byte, bool) {
 			}
 
 			// Return the value.
-	        q.mutex.Unlock()
+			q.mutex.Unlock()
 			return curr.value, true
 		}
 

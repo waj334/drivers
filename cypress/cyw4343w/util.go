@@ -15,3 +15,6 @@ func roundUp[T constraints.Integer](x T, y T) T {
 func toSlice[T any](value *T) []byte {
 	return unsafe.Slice((*byte)(unsafe.Pointer(value)), unsafe.Sizeof(*value))
 }
+
+//sigo:extern memcmp memcmp
+func memcmp(dst, src unsafe.Pointer, num uintptr) int

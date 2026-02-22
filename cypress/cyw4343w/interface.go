@@ -425,9 +425,8 @@ func (c *Cyw4343w[SDIO]) LoadClm() error {
 		return errInvalidClmImage
 	}
 
-	clm := c.clm
-	const maxLoadLen = 512
 	const clmHeaderLength = int(unsafe.Sizeof(clmHeaderType{}))
+	const maxLoadLen = 512 - clmHeaderLength
 	var buffer [maxLoadLen + clmHeaderLength]byte
 
 	offset := 0
@@ -438,26 +437,31 @@ func (c *Cyw4343w[SDIO]) LoadClm() error {
 		crc:  0,
 	}
 
+	payload := c.clm
 	clmLength := len(c.clm)
 	for offset < clmLength {
 		n := min(maxLoadLen, clmLength-offset)
 		header.length = uint32(n)
 
-		flags := uint16(1 << 12) // clmload request
-		if offset == 0 {         // first fragment
+		// clmload request.
+		flags := uint16(1 << 12)
+
+		if offset == 0 {
+			// first fragment.
 			flags |= 2
 		}
 
-		if offset+n == clmLength { // last fragment
+		if offset+n == clmLength {
+			// last fragment.
 			flags |= 4
 		}
 
 		header.flag = flags
 
-		copy(buffer[clmHeaderLength:], clm[:n])
-		clm = clm[n:]
+		copy(buffer[clmHeaderLength:], payload[:n])
+		payload = payload[n:]
 
-		// NOTE: send only header+n, not the whole scratch buffer
+		// NOTE: send only header+n, not the whole scratch buffer.
 		if _, err := c.SetIovar(IovarStrClmload, buffer[:clmHeaderLength+n]); err != nil {
 			return err
 		}
@@ -493,18 +497,16 @@ func (c *Cyw4343w[SDIO]) downloadFirmware() error {
 		}
 	}
 
-	firmware := c.firmware
-	nvram := c.nvram
 	ramAddr := atcmRamBaseAddress(c.chipId)
 	ramSize := chipRamSize(c.chipId)
 
-	err := c.writeBackplaneBytes(ramAddr, firmware)
+	err := c.writeBackplaneBytes(ramAddr, c.firmware)
 	if err != nil {
 		return err
 	}
 
-	nvramLen := roundUp(uint32(len(nvram)), 4)
-	err = c.writeBackplaneBytes(ramAddr+ramSize-4-nvramLen, nvram)
+	nvramLen := roundUp(uint32(len(c.nvram)), 4)
+	err = c.writeBackplaneBytes(ramAddr+ramSize-4-nvramLen, c.nvram)
 	if err != nil {
 		return err
 	}

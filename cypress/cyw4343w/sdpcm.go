@@ -1,8 +1,9 @@
 package cyw4343w
 
 import (
-	"pkg.si-go.dev/chip/core/hal"
 	"unsafe"
+
+	"pkg.si-go.dev/chip/core/hal"
 )
 
 const (
@@ -63,17 +64,21 @@ func (c *Cyw4343w[SDIO]) processRxPacket(data []byte) error {
 		return nil
 	}
 
+	// Update credits.
+	c.updateCredit(data)
+
 	// Check the SDPCM channel to decide what to do with the packet.
+	packet := data[sdpcmHeaderLength:]
 	switch header.channelAndFlags & 0x0F {
 	case controlHeader:
-		return c.processIoctl(data[sdpcmHeaderLength:])
+		return c.processIoctl(packet)
 	case dataHeader:
+		return c.processData(packet)
 	case asynceventHeader:
+		return c.processAsync(packet)
 	default:
 		return hal.ErrInvalidState
 	}
-
-	c.updateCredit(data)
 
 	return nil
 }

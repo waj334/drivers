@@ -1,6 +1,8 @@
 package cyw4343w
 
 import (
+	"sync"
+
 	"pkg.si-go.dev/chip/core/hal/sdio"
 )
 
@@ -9,6 +11,10 @@ type DataTransfer struct {
 	Address  uint32
 	Function uint32
 }
+
+var (
+	transferMutex sync.Mutex
+)
 
 func (c *Cyw4343w[SDIO]) write(transfer DataTransfer) error {
 	return c.transfer(transfer, true)
@@ -26,6 +32,10 @@ func (c *Cyw4343w[SDIO]) transfer(transfer DataTransfer, write bool) error {
 	if write {
 		direction = sdio.Write
 	}
+
+	// Only one goroutine should be using the SDIO interface at a time.
+	transferMutex.Lock()
+	defer transferMutex.Unlock()
 
 	// Send the packet.
 	if len(transfer.Data) == 1 {

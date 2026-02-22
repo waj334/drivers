@@ -1,10 +1,8 @@
 package main
 
 import (
-	"pkg.si-go.dev/drivers/cypress/cyw4343w"
-	"unsafe"
-
 	"time"
+	"unsafe"
 
 	_ "pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7"
 	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal"
@@ -12,6 +10,7 @@ import (
 	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal/sdio"
 	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal/timer"
 	"pkg.si-go.dev/chip/arm/cortexm/runtime"
+	"pkg.si-go.dev/drivers/cypress/cyw4343w"
 )
 
 const (
@@ -177,13 +176,6 @@ func main() {
 		}
 	}()
 
-	// read the country BEFORE uploading the CLM image so we can verify if uploading the CLM image did anything later.
-	response, err := WifiHost.Iovar(cyw4343w.IovarStrCountry, 200)
-	if err != nil {
-		errorState()
-		busyLoop()
-	}
-
 	// The CLM image needs to be loaded before any Wi-Fi/BLE functionality can be used.
 	err = WifiHost.LoadClm()
 	if err != nil {
@@ -191,25 +183,14 @@ func main() {
 		busyLoop()
 	}
 
-	response, err = WifiHost.Iovar(cyw4343w.IovarStrClmver, 200)
+	// Scan for Wi-Fi networks.
+	networks, err := WifiHost.ScanWifiNetworks()
 	if err != nil {
 		errorState()
 		busyLoop()
 	}
 
-	response, err = WifiHost.Iovar(cyw4343w.IovarStrVersion, 200)
-	if err != nil {
-		errorState()
-		busyLoop()
-	}
-
-	response, err = WifiHost.Iovar(cyw4343w.IovarStrCountry, 200)
-	if err != nil {
-		errorState()
-		busyLoop()
-	}
-
-	use(response)
+	use(networks)
 
 	goodState()
 	busyLoop()
