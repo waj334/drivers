@@ -35,7 +35,6 @@ func (c *Cyw4343w[SDIO]) transfer(transfer DataTransfer, write bool) error {
 
 	// Only one goroutine should be using the SDIO interface at a time.
 	transferMutex.Lock()
-	defer transferMutex.Unlock()
 
 	// Send the packet.
 	if len(transfer.Data) == 1 {
@@ -50,7 +49,7 @@ func (c *Cyw4343w[SDIO]) transfer(transfer DataTransfer, write bool) error {
 			args.Data = uint32(transfer.Data[0])
 		}
 
-		// Write single byte using CMD52.
+		// Write a single byte using CMD52.
 		resp, err = c.host.SendCommand(sdio.Command{
 			Data:     transfer.Data,
 			Class:    sdio.CMD52,
@@ -58,12 +57,14 @@ func (c *Cyw4343w[SDIO]) transfer(transfer DataTransfer, write bool) error {
 		})
 
 		if err != nil {
+			transferMutex.Unlock()
 			return err
 		}
 
 		// Check the response for an error.
 		r5 := sdio.R5(resp[0])
 		if r5.Flags()&sdio.R5ErrorBits != 0 {
+			transferMutex.Unlock()
 			return sdio.ErrCommandFail
 		}
 
@@ -71,35 +72,43 @@ func (c *Cyw4343w[SDIO]) transfer(transfer DataTransfer, write bool) error {
 			// Copy the data into the buffer.
 			transfer.Data[0] = r5.Data()
 		}
+
+		transferMutex.Unlock()
+		return nil
 	} else if len(transfer.Data) >= 64 {
 		// Write using CMD53 in block mode.
-		return c.transferBlocks(transfer, write)
-	} else {
-		// Write using CMD53 in byte mode.
-		resp, err = c.host.SendCommand(sdio.Command{
-			Data:  transfer.Data,
-			Class: sdio.CMD53,
-			Argument: sdio.CMD53Args{
-				Count:     uint32(len(transfer.Data)),
-				Address:   transfer.Address,
-				OpCode:    sdio.Incrementing,
-				BlockMode: sdio.Bytes,
-				Function:  transfer.Function,
-				ReadWrite: direction,
-			}.Value(),
-		})
-
-		if err != nil {
-			return err
-		}
-
-		// Check the response for an error.
-		r5 := sdio.R5(resp[0])
-		if r5.Flags()&sdio.R5ErrorBits != 0 {
-			return sdio.ErrCommandFail
-		}
+		err := c.transferBlocks(transfer, write)
+		transferMutex.Unlock()
+		return err
 	}
 
+	// Transfer 2-63 bytes using CMD53 in byte mode.
+	resp, err = c.host.SendCommand(sdio.Command{
+		Data:  transfer.Data,
+		Class: sdio.CMD53,
+		Argument: sdio.CMD53Args{
+			Count:     uint32(len(transfer.Data)),
+			Address:   transfer.Address,
+			OpCode:    sdio.Incrementing,
+			BlockMode: sdio.Bytes,
+			Function:  transfer.Function,
+			ReadWrite: direction,
+		}.Value(),
+	})
+
+	if err != nil {
+		transferMutex.Unlock()
+		return err
+	}
+
+	// Check the response for an error.
+	r5 := sdio.R5(resp[0])
+	if r5.Flags()&sdio.R5ErrorBits != 0 {
+		transferMutex.Unlock()
+		return sdio.ErrCommandFail
+	}
+
+	transferMutex.Unlock()
 	return nil
 }
 

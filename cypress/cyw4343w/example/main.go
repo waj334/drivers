@@ -5,6 +5,7 @@ import (
 	"unsafe"
 
 	_ "pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7"
+	stm32h7x7 "pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7"
 	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal"
 	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal/pin"
 	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal/sdio"
@@ -53,8 +54,8 @@ func nanotime() uint64 {
 }
 
 //sigo:export addsleep runtime.addsleep
-func addsleep(deadline uint64) bool {
-	return !TIM2.SetAlarm(deadline/timescale, alarm)
+func addsleep(deadline uint64) {
+	TIM2.SetAlarm(deadline/timescale, alarm)
 }
 
 func init() {
@@ -67,6 +68,7 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+	stm32h7x7.IrqTim2.SetPriority(1)
 }
 
 func main() {
@@ -101,6 +103,7 @@ func main() {
 
 	time.Sleep(time.Millisecond * 250)
 
+	stm32h7x7.IrqSdmmc1.SetPriority(2)
 	err := SDIO1.Configure(sdio.Config{
 		Enable: true,
 		CK:     SDIO_CLK,
@@ -111,7 +114,7 @@ func main() {
 			SDIO_D4,
 		},
 		CMD: SDIO_CMD,
-		DMA: false,
+		DMA: true,
 	})
 
 	if err != nil {

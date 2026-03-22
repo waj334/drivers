@@ -116,9 +116,31 @@ func (c *Cyw4343w[SDIO]) InitializeCard() error {
 	var err error
 	ready := false
 
+	// Send CMD52 to reset the I/O portion of the card
+	_, _ = c.host.SendCommand(sdio.Command{
+		Class: sdio.CMD52,
+		Argument: sdio.CMD52Args{
+			Address:   0x06,
+			Function:  0,
+			ReadWrite: sdio.Write,
+			Data:      0x08,
+		}.Value(),
+	})
+
 	// Send CMD0 to reset the card
 	_, err = c.host.SendCommand(sdio.Command{
 		Class: sdio.CMD0,
+	})
+
+	if err != nil {
+		c.mutex.Unlock()
+		return err
+	}
+
+	// Send CMD5 with argument 0 to query the card
+	_, err = c.host.SendCommand(sdio.Command{
+		Class:    sdio.CMD5,
+		Argument: 0,
 	})
 
 	if err != nil {
@@ -187,6 +209,7 @@ func (c *Cyw4343w[SDIO]) InitializeCard() error {
 func (c *Cyw4343w[SDIO]) initBackplane() error {
 	// Enable the backplane.
 	deadline := time.Now().Add(defaultTimeout)
+	_ = deadline
 	for {
 		err := c.writeRegisterValue(busFunction, sdiodCccrIoen, 1, sdioFuncEnable1)
 		if err != nil {

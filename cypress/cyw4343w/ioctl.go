@@ -44,7 +44,6 @@ func (c *Cyw4343w[SDIO]) sendIoctl(cmd ioctlCommandType) ([]byte, error) {
 	}
 
 	c.iovarMutex.Lock()
-	defer c.iovarMutex.Unlock()
 
 	ioctlId := c.requestId()
 	totalLength := uint16(len(cmd.data))
@@ -83,6 +82,7 @@ func (c *Cyw4343w[SDIO]) sendIoctl(cmd ioctlCommandType) ([]byte, error) {
 	// Send the IOCTL command.
 	err := c.write(ioctlTransfer(cmd.data))
 	if err != nil {
+		c.iovarMutex.Unlock()
 		return nil, err
 	}
 
@@ -91,11 +91,14 @@ func (c *Cyw4343w[SDIO]) sendIoctl(cmd ioctlCommandType) ([]byte, error) {
 	for {
 		response, ok := c.receiveQueue.Dequeue(ioctlId)
 		if ok {
+			c.iovarMutex.Unlock()
 			return response, nil
 		} else if time.Now().After(deadline) {
+			c.iovarMutex.Unlock()
 			return nil, sdio.ErrTimeout
 		}
 	}
+
 }
 
 func (c *Cyw4343w[SDIO]) processIoctl(data []byte) error {
