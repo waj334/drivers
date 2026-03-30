@@ -45,6 +45,18 @@ func (c *Cyw4343w[SDIO]) sendIoctl(cmd ioctlCommandType) ([]byte, error) {
 
 	c.iovarMutex.Lock()
 
+	// Ensure the bus is awake before sending.
+	if err := c.busWake(); err != nil {
+		c.iovarMutex.Unlock()
+		return nil, err
+	}
+
+	// Wait for TX credits before sending.
+	if err := c.waitForCredits(); err != nil {
+		c.iovarMutex.Unlock()
+		return nil, err
+	}
+
 	ioctlId := c.requestId()
 	totalLength := uint16(len(cmd.data))
 
@@ -86,24 +98,31 @@ func (c *Cyw4343w[SDIO]) sendIoctl(cmd ioctlCommandType) ([]byte, error) {
 		return nil, err
 	}
 
-	// Wait for the response.
+	// Wait for the response. The background polling goroutine will populate the receive queue.
 	deadline := time.Now().Add(defaultTimeout)
 	for {
 		response, ok := c.receiveQueue.Dequeue(ioctlId)
 		if ok {
 			c.iovarMutex.Unlock()
-			return response, nil
-		} else if time.Now().After(deadline) {
+			header := (*ioctlHeaderType)(unsafe.Pointer(&response[0]))
+			if int32(header.status) != 0 {
+				return nil, errIoctlFailed
+			}
+			return response[ioctlHeaderLength:], nil
+		}
+
+		if time.Now().After(deadline) {
 			c.iovarMutex.Unlock()
 			return nil, sdio.ErrTimeout
 		}
-	}
 
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func (c *Cyw4343w[SDIO]) processIoctl(data []byte) error {
 	header := *((*ioctlHeaderType)(unsafe.Pointer(&data[0])))
 	id := (header.flags & cdcfIocIdMask) >> cdcfIocIdShift
-	c.receiveQueue.Insert(id, data[ioctlHeaderLength:])
+	c.receiveQueue.Insert(id, data)
 	return nil
 }

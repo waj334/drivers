@@ -9,7 +9,15 @@ const (
 
 func (c *Cyw4343w[SDIO]) processAsync(data []byte) error {
 	header := (*bcdHeaderType)(unsafe.Pointer(&data[0]))
-	event := (*eventType)(unsafe.Pointer(&data[header.dataOffset+1]))
+	eventOffset := int(unsafe.Sizeof(bcdHeaderType{})) + int(header.dataOffset)*4
+	if eventOffset+int(unsafe.Sizeof(eventType{})) > len(data) {
+		return nil
+	}
+	event := (*eventType)(unsafe.Pointer(&data[eventOffset]))
+
+	// The ethernet and event header fields are in network byte order (big-endian).
+	// Byte-swap them to host order in-place so all downstream readers see native values.
+	event.eth.ethernetType = ntoh16(event.eth.ethernetType)
 
 	if event.eth.ethernetType != etherTypeBrcm {
 		// This is not an event.
@@ -21,8 +29,15 @@ func (c *Cyw4343w[SDIO]) processAsync(data []byte) error {
 		return nil
 	}
 
+	// Swap event message fields from network to host order.
+	event.event.eventType = ntoh32(event.event.eventType)
+	event.event.status = ntoh32(event.event.status)
+	event.event.reason = ntoh32(event.event.reason)
+	event.event.authType = ntoh32(event.event.authType)
+	event.event.dataLength = ntoh32(event.event.dataLength)
+
 	// Verify that the data length is correct.
-	if event.event.dataLength > uint32(len(data)-(int(uintptr(unsafe.Pointer(event))-uintptr(unsafe.Pointer(header))))) {
+	if event.event.dataLength > uint32(len(data)-eventOffset-int(unsafe.Sizeof(eventType{}))) {
 		// The size does not match.
 		return nil
 	}
@@ -40,7 +55,8 @@ func (c *Cyw4343w[SDIO]) processAsync(data []byte) error {
 		whdEvent.reason += wlcESupReasonOffset
 	}
 
-	// TODO: Decide how events should be handled...
+	// Queue the event for waiting callers.
+	c.eventQueue.Insert(whdEvent.eventType, data)
 
 	return nil
 }

@@ -1,8 +1,9 @@
 package main
 
 import (
+	_ "embed"
+	"os"
 	"time"
-	"unsafe"
 
 	_ "pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7"
 	stm32h7x7 "pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7"
@@ -36,6 +37,15 @@ const (
 	timescale = uint64(time.Microsecond)
 )
 
+//go:embed 4343WA1.bin
+var firmware []byte
+
+//go:embed 4343W1DX_CLM.bin
+var clm []byte
+
+//go:embed 4343W1DX_NVRAM.bin
+var nvram []byte
+
 var (
 	WifiHost = cyw4343w.New[sdio.SDIO]()
 )
@@ -59,6 +69,8 @@ func addsleep(deadline uint64) {
 }
 
 func init() {
+	os.Stdout = &runtime.Semihosting
+
 	// Prevent SysTick from driving timers.
 	runtime.SysTickCanWake = false
 
@@ -66,6 +78,7 @@ func init() {
 
 	err := TIM2.Configure(timer.Config{Enable: true})
 	if err != nil {
+		os.Stdout.WriteString("Error: " + err.Error() + "\n")
 		panic(err)
 	}
 	stm32h7x7.IrqTim2.SetPriority(1)
@@ -118,18 +131,20 @@ func main() {
 	})
 
 	if err != nil {
+		os.Stdout.WriteString("Error: " + err.Error() + "\n")
 		errorState()
 		busyLoop()
 	}
 
 	err = WifiHost.Configure(cyw4343w.Config[sdio.SDIO]{
 		Host:     SDIO1,
-		Firmware: unsafe.Slice(unsafe.StringData(cyw4343w.Firmware), len(cyw4343w.Firmware)),
-		Nvram:    unsafe.Slice(unsafe.StringData(cyw4343w.Nvram), len(cyw4343w.Nvram)),
-		Clm:      unsafe.Slice(unsafe.StringData(cyw4343w.Clm), len(cyw4343w.Clm)),
+		Firmware: firmware,
+		Nvram:    nvram,
+		Clm:      clm,
 	})
 
 	if err != nil {
+		os.Stdout.WriteString("Error: " + err.Error() + "\n")
 		errorState()
 		busyLoop()
 	}
@@ -137,6 +152,7 @@ func main() {
 	// Initialize the card.
 	err = WifiHost.InitializeCard()
 	if err != nil {
+		os.Stdout.WriteString("Error: " + err.Error() + "\n")
 		errorState()
 		busyLoop()
 	}
@@ -151,12 +167,14 @@ func main() {
 	})
 
 	if err != nil {
+		os.Stdout.WriteString("Error: " + err.Error() + "\n")
 		errorState()
 		busyLoop()
 	}
 
 	err = SDIO1.SetClockFrequency(10_000_000)
 	if err != nil {
+		os.Stdout.WriteString("Error: " + err.Error() + "\n")
 		errorState()
 		busyLoop()
 	}
@@ -164,6 +182,7 @@ func main() {
 	// Initialize the Wi-Fi subsystem.
 	err = WifiHost.Initialize()
 	if err != nil {
+		os.Stdout.WriteString("Error: " + err.Error() + "\n")
 		errorState()
 		busyLoop()
 	}
@@ -173,6 +192,7 @@ func main() {
 		for {
 			err := WifiHost.Poll()
 			if err != nil {
+				os.Stdout.WriteString("Error: " + err.Error() + "\n")
 				errorState()
 				//return
 			}
@@ -182,6 +202,15 @@ func main() {
 	// The CLM image needs to be loaded before any Wi-Fi/BLE functionality can be used.
 	err = WifiHost.LoadClm()
 	if err != nil {
+		os.Stdout.WriteString("Error: " + err.Error() + "\n")
+		errorState()
+		busyLoop()
+	}
+
+	// Bring up the WLAN interface.
+	err = WifiHost.Up()
+	if err != nil {
+		os.Stdout.WriteString("Error: " + err.Error() + "\n")
 		errorState()
 		busyLoop()
 	}
@@ -189,8 +218,13 @@ func main() {
 	// Scan for Wi-Fi networks.
 	networks, err := WifiHost.ScanWifiNetworks()
 	if err != nil {
+		os.Stdout.WriteString("Error: " + err.Error() + "\n")
 		errorState()
 		busyLoop()
+	}
+
+	for _, network := range networks {
+		_, _ = os.Stdout.WriteString(network + "\n")
 	}
 
 	use(networks)

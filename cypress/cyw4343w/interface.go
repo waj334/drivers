@@ -36,6 +36,7 @@ type Config[Host sdio.Host] struct {
 type Cyw4343w[Host sdio.Host] struct {
 	host         Host
 	receiveQueue queue
+	eventQueue   queue
 
 	requestIdCounter                  uint32
 	bsscIndex                         uint32 // Leaving at 0 for now.
@@ -43,14 +44,17 @@ type Cyw4343w[Host sdio.Host] struct {
 	chipId                            uint32
 	txSeq                             uint8
 	txMax                             uint8
+	busSleepEnabled                   bool
+	busIsUp                           bool
 
 	firmware []byte
 	nvram    []byte
 	clm      []byte
 
-	mutex      sync.Mutex
-	iovarMutex sync.Mutex
-	queueMutex sync.Mutex
+	mutex           sync.Mutex
+	iovarMutex      sync.Mutex
+	queueMutex      sync.Mutex
+	eventQueueMutex sync.Mutex
 }
 
 func New[Host sdio.Host]() *Cyw4343w[Host] {
@@ -60,9 +64,12 @@ func New[Host sdio.Host]() *Cyw4343w[Host] {
 		txSeq:            1,
 	}
 
-	// Initialize the queue.
+	// Initialize the queues.
 	c.receiveQueue = queue{
 		mutex: &c.queueMutex,
+	}
+	c.eventQueue = queue{
+		mutex: &c.eventQueueMutex,
 	}
 
 	return c
@@ -427,6 +434,9 @@ func (c *Cyw4343w[SDIO]) initBackplane() error {
 		return err
 	}
 
+	c.busSleepEnabled = true
+	c.busIsUp = true
+
 	// Poll for initial credits.
 	err = c.poll()
 	if err != nil {
@@ -497,7 +507,15 @@ func (c *Cyw4343w[SDIO]) LoadClm() error {
 func (c *Cyw4343w[SDIO]) downloadFirmware() error {
 	ramStartAddress := atcmRamBaseAddress(c.chipId)
 	if ramStartAddress != 0 {
-		// TODO: Reset the WLAN ARM core.
+		// For chips with ATCM RAM (e.g. CYW4373, CYW43909), halt and reset the ARM core.
+		err := c.disableDeviceCore(wlanArmCore, wlanCoreFlagCpuHalt)
+		if err != nil {
+			return err
+		}
+		err = c.resetDeviceCore(wlanArmCore, wlanCoreFlagCpuHalt)
+		if err != nil {
+			return err
+		}
 	} else {
 		err := c.disableDeviceCore(wlanArmCore, wlanCoreFlagNone)
 		if err != nil {
@@ -542,7 +560,11 @@ func (c *Cyw4343w[SDIO]) downloadFirmware() error {
 	}
 
 	if ramStartAddress != 0 {
-		// TODO: Reset core with bits.
+		// For ATCM chips, release the ARM core from halt by resetting without the CPU halt flag.
+		err = c.resetDeviceCore(wlanArmCore, wlanCoreFlagNone)
+		if err != nil {
+			return err
+		}
 	} else {
 		err = c.resetDeviceCore(wlanArmCore, wlanCoreFlagNone)
 		if err != nil {
@@ -659,6 +681,10 @@ func (c *Cyw4343w[SDIO]) readBackplaneValue(address uint32, length uint8) (uint3
 }
 
 func (c *Cyw4343w[SDIO]) writeBackplaneBytes(address uint32, data []byte) error {
+	if err := c.busWake(); err != nil {
+		return err
+	}
+
 	remaining := uint32(len(data))
 	offset := uint32(0)
 	for remaining > 0 {
@@ -707,6 +733,10 @@ func (c *Cyw4343w[SDIO]) writeBackplaneBytes(address uint32, data []byte) error 
 }
 
 func (c *Cyw4343w[SDIO]) readBackplaneBytes(address uint32, data []byte) error {
+	if err := c.busWake(); err != nil {
+		return err
+	}
+
 	remaining := uint32(len(data))
 	offset := uint32(0)
 	for remaining > 0 {
@@ -718,7 +748,7 @@ func (c *Cyw4343w[SDIO]) readBackplaneBytes(address uint32, data []byte) error {
 
 		// Make sure we don't cross the backplane window boundary.
 		windowOffset := address & backplaneAddressMask
-		if windowOffset+transferSize > backplaneAddressMask {
+		if windowOffset+transferSize >= backplaneWindowSize {
 			transferSize = backplaneWindowSize - windowOffset
 		}
 
@@ -922,4 +952,66 @@ func (c *Cyw4343w[SDIO]) isFwSrCapable() (bool, error) {
 		return false, err
 	}
 	return srCtrl != 0, nil
+}
+
+// busWake ensures the SDIO bus is awake and ready for backplane access.
+// This must be called before any backplane register read/write when save/restore is enabled.
+func (c *Cyw4343w[SDIO]) busWake() error {
+	if !c.busSleepEnabled {
+		return nil
+	}
+
+	// Set the KSO bit to wake the device.
+	for attempt := 0; attempt < maxKsoAttempts; attempt++ {
+		err := c.writeRegisterValue(backplaneFunction, sdioSleepCsr, 1, sbsdioSlpcsrKeepWlKso)
+		if err != nil {
+			time.Sleep(ksoWakeMs * time.Millisecond)
+			continue
+		}
+
+		// Read back to verify KSO is set and device is on.
+		val, err := c.readRegisterValue(backplaneFunction, sdioSleepCsr, 1)
+		if err != nil {
+			time.Sleep(ksoWaitMs * time.Millisecond)
+			continue
+		}
+
+		if val&(sbsdioSlpcsrKeepWlKso|sbsdioSlpcsrWlDevon) == (sbsdioSlpcsrKeepWlKso | sbsdioSlpcsrWlDevon) {
+			// Device is awake. Force HT clock.
+			return c.writeRegisterValue(backplaneFunction, sdioChipClockCsr, 1, sbsdioForceHt)
+		}
+
+		time.Sleep(ksoWaitMs * time.Millisecond)
+	}
+
+	return errTimeout
+}
+
+// busSleep puts the SDIO bus into low-power mode when idle.
+func (c *Cyw4343w[SDIO]) busSleep() error {
+	if !c.busSleepEnabled {
+		return nil
+	}
+
+	// Clear the ForceHT bit so the device can manage its own clocks.
+	return c.writeRegisterValue(backplaneFunction, sdioChipClockCsr, 1, 0)
+}
+
+// ensureBackplaneUp verifies that WLAN function F2 is ready for data transfer.
+func (c *Cyw4343w[SDIO]) ensureBackplaneUp() (bool, error) {
+	if c.busIsUp {
+		return true, nil
+	}
+
+	val, err := c.readRegisterValue(busFunction, sdiodCccrIordy, 1)
+	if err != nil {
+		return false, err
+	}
+
+	if val&sdioFuncEnable2 != 0 {
+		c.busIsUp = true
+		return true, nil
+	}
+
+	return false, nil
 }

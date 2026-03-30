@@ -8,6 +8,7 @@ const (
 	errFirmwareDownloadFailed _error = "firmware download failed"
 	errCoreIsNotUp            _error = "core is not up"
 	errTimeout                _error = "timeout"
+	errIoctlFailed            _error = "ioctl failed"
 )
 
 type _error string

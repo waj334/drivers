@@ -1,9 +1,11 @@
 package cyw4343w
 
 import (
+	"time"
 	"unsafe"
 
 	"pkg.si-go.dev/chip/core/hal"
+	"pkg.si-go.dev/chip/core/hal/sdio"
 )
 
 const (
@@ -39,7 +41,31 @@ func (c *Cyw4343w[SDIO]) updateCredit(data []byte) {
 		}
 		c.txMax = txSeqMax
 	}
-	// TODO: Choose to enable flow control here...
+}
+
+// hasCredit returns true if the driver has TX credit available to send a packet.
+func (c *Cyw4343w[SDIO]) hasCredit() bool {
+	return c.txSeq != c.txMax
+}
+
+// waitForCredits waits until a TX credit is available. The background polling goroutine updates credits.
+func (c *Cyw4343w[SDIO]) waitForCredits() error {
+	if c.hasCredit() {
+		return nil
+	}
+
+	deadline := time.Now().Add(defaultTimeout)
+	for {
+		if c.hasCredit() {
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return sdio.ErrTimeout
+		}
+
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func (c *Cyw4343w[SDIO]) processRxPacket(data []byte) error {
@@ -67,8 +93,17 @@ func (c *Cyw4343w[SDIO]) processRxPacket(data []byte) error {
 	// Update credits.
 	c.updateCredit(data)
 
-	// Check the SDPCM channel to decide what to do with the packet.
-	packet := data[sdpcmHeaderLength:]
+	// Use the header_length field as the data offset — the firmware may include
+	// extension headers or padding beyond the fixed 12-byte SDPCM header.
+	dataOffset := uint16(header.headerLength)
+	if dataOffset < uint16(sdpcmHeaderLength) {
+		dataOffset = uint16(sdpcmHeaderLength)
+	}
+	if dataOffset >= size {
+		// The header_length exceeds the packet — nothing to process.
+		return nil
+	}
+	packet := data[dataOffset:]
 	switch header.channelAndFlags & 0x0F {
 	case controlHeader:
 		return c.processIoctl(packet)
@@ -77,8 +112,7 @@ func (c *Cyw4343w[SDIO]) processRxPacket(data []byte) error {
 	case asynceventHeader:
 		return c.processAsync(packet)
 	default:
-		return hal.ErrInvalidState
+		// Silently ignore unhandled channels (e.g. glom/aggregation).
+		return nil
 	}
-
-	return nil
 }

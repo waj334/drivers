@@ -15,6 +15,15 @@ func ioTransfer(data []byte) DataTransfer {
 	}
 }
 
+// abortRead sends an I/O abort to terminate a failed SDIO transfer on F2.
+func (c *Cyw4343w[SDIO]) abortRead() {
+	// Write to the CCCR I/O Abort register to abort the current F2 operation.
+	_ = c.writeRegisterValue(busFunction, sdiodCccrIoabort, 1, uint32(wlanFunction))
+
+	// Also set the read frame terminate bit in the frame control register.
+	_ = c.writeRegisterValue(backplaneFunction, sdioFrameControl, 1, sfcRfTerm)
+}
+
 func (c *Cyw4343w[SDIO]) Poll() error {
 	c.mutex.Lock()
 	err := c.poll()
@@ -23,6 +32,11 @@ func (c *Cyw4343w[SDIO]) Poll() error {
 }
 
 func (c *Cyw4343w[SDIO]) poll() error {
+	// Ensure the bus is awake before polling.
+	if err := c.busWake(); err != nil {
+		return err
+	}
+
 	// Check if the interrupt indicated there is a packet to read.
 	available, err := c.packetAvailableToRead()
 	if err != nil {
@@ -40,15 +54,22 @@ func (c *Cyw4343w[SDIO]) poll() error {
 }
 
 func (c *Cyw4343w[SDIO]) readFrame() ([]byte, error) {
-	// TODO: Check that the WLAN backplane is up before continuing...
+	// Check that the WLAN backplane is up before continuing.
+	up, err := c.ensureBackplaneUp()
+	if err != nil {
+		return nil, err
+	}
+	if !up {
+		return nil, nil
+	}
 
 	var hwTag [2]uint16
 	bhwTag := unsafe.Slice((*byte)(unsafe.Pointer(&hwTag[0])), 4)
 
 	// Read the frame header and verify validity.
-	err := c.read(ioTransfer(bhwTag[:4]))
+	err = c.read(ioTransfer(bhwTag[:4]))
 	if err != nil {
-		// TODO: Abort the read.
+		c.abortRead()
 		return nil, err
 	}
 
@@ -60,11 +81,11 @@ func (c *Cyw4343w[SDIO]) readFrame() ([]byte, error) {
 		return nil, nil
 	}
 
-	if hwTag[0] == 12 /* && WLAN_IS_UP */ {
+	if hwTag[0] == 12 && c.busIsUp {
 		var creditBuf [8]byte
 		err = c.read(ioTransfer(creditBuf[:]))
 		if err != nil {
-			// TODO: Abort the read.
+			c.abortRead()
 			return nil, err
 		}
 		c.updateCredit(creditBuf[:])
@@ -98,18 +119,20 @@ func (c *Cyw4343w[SDIO]) receiveOnePacket() error {
 	}
 
 	// Process the packet.
-	err = c.processRxPacket(data)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.processRxPacket(data)
 }
 
 func (c *Cyw4343w[SDIO]) packetAvailableToRead() (bool, error) {
 	base := sdiodCoreBaseAddress(c.chipId)
 
-	// TODO: Check that the WLAN backplane is up before continuing...
+	// Check that the WLAN backplane is up before continuing.
+	up, err := c.ensureBackplaneUp()
+	if err != nil {
+		return false, err
+	}
+	if !up {
+		return false, nil
+	}
 
 	// Read the interrupt status.
 	irqStatus, err := c.readBackplaneValue(base+0x20, 4)
