@@ -2,6 +2,8 @@ package main
 
 import (
 	_ "embed"
+	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal/pin"
 	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal/sdio"
 	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal/timer"
+	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal/uart"
 	"pkg.si-go.dev/chip/arm/cortexm/runtime"
 	"pkg.si-go.dev/drivers/cypress/cyw4343w"
 )
@@ -48,40 +51,46 @@ var nvram []byte
 
 var (
 	WifiHost = cyw4343w.New[sdio.SDIO]()
+	UART     = uart.UART1
 )
 
-//sigo:export wake runtime.wake
-func wake(t uint64)
-
-func alarm(t uint64) {
-	wake(t)
-}
-
-//sigo:export nanotime runtime.nanotime
-func nanotime() uint64 {
-	// The timer resolution is 1uS per tick.
-	return TIM2.Tick() * timescale
-}
-
-//sigo:export addsleep runtime.addsleep
-func addsleep(deadline uint64) {
-	TIM2.SetAlarm(deadline/timescale, alarm)
-}
-
 func init() {
-	os.Stdout = &runtime.Semihosting
-
 	// Prevent SysTick from driving timers.
 	runtime.SysTickCanWake = false
 
 	hal.ConfigureClocks()
 
-	err := TIM2.Configure(timer.Config{Enable: true})
+	os.Stdout = &runtime.Semihosting
+
+	// Configure UART
+	err := UART.Configure(uart.Config{
+		Enable: true,
+		TX:     pin.PA9,
+		RX:     pin.PB7,
+		// FrameFormat:     uart.UsartFrame,
+		Baud:            115_200,
+		CharacterSize:   8,
+		NumStopBits:     1,
+		ReceiveEnabled:  true,
+		TransmitEnabled: true,
+	})
+
 	if err != nil {
-		os.Stdout.WriteString("Error: " + err.Error() + "\n")
+		fmt.Printf("Error configuring UART: %v\n", err)
+		panic(err)
+	}
+
+	os.Stdout = UART
+
+	err = TIM2.Configure(timer.Config{Enable: true})
+	if err != nil {
+		fmt.Printf("Error configuring TIM2: %v\n", err)
 		panic(err)
 	}
 	stm32h7x7.IrqTim2.SetPriority(1)
+
+	// Service the networking stack.
+	go net.Poll()
 }
 
 func main() {
@@ -131,7 +140,7 @@ func main() {
 	})
 
 	if err != nil {
-		os.Stdout.WriteString("Error: " + err.Error() + "\n")
+		fmt.Printf("Error configuring SDIO: %v\n", err)
 		errorState()
 		busyLoop()
 	}
@@ -144,7 +153,7 @@ func main() {
 	})
 
 	if err != nil {
-		os.Stdout.WriteString("Error: " + err.Error() + "\n")
+		fmt.Printf("Error configuring Wi-Fi host: %v\n", err)
 		errorState()
 		busyLoop()
 	}
@@ -152,7 +161,7 @@ func main() {
 	// Initialize the card.
 	err = WifiHost.InitializeCard()
 	if err != nil {
-		os.Stdout.WriteString("Error: " + err.Error() + "\n")
+		fmt.Printf("Error initializing Wi-Fi card: %v\n", err)
 		errorState()
 		busyLoop()
 	}
@@ -167,14 +176,14 @@ func main() {
 	})
 
 	if err != nil {
-		os.Stdout.WriteString("Error: " + err.Error() + "\n")
+		fmt.Printf("Error reconfiguring SDIO: %v\n", err)
 		errorState()
 		busyLoop()
 	}
 
 	err = SDIO1.SetClockFrequency(10_000_000)
 	if err != nil {
-		os.Stdout.WriteString("Error: " + err.Error() + "\n")
+		fmt.Printf("Error setting SDIO clock frequency: %v\n", err)
 		errorState()
 		busyLoop()
 	}
@@ -182,7 +191,7 @@ func main() {
 	// Initialize the Wi-Fi subsystem.
 	err = WifiHost.Initialize()
 	if err != nil {
-		os.Stdout.WriteString("Error: " + err.Error() + "\n")
+		fmt.Printf("Error initializing Wi-Fi subsystem: %v\n", err)
 		errorState()
 		busyLoop()
 	}
@@ -192,9 +201,7 @@ func main() {
 		for {
 			err := WifiHost.Poll()
 			if err != nil {
-				os.Stdout.WriteString("Error: " + err.Error() + "\n")
-				errorState()
-				//return
+				fmt.Printf("Error occurred while polling Wi-Fi subsystem: %v\n", err)
 			}
 		}
 	}()
@@ -202,7 +209,7 @@ func main() {
 	// The CLM image needs to be loaded before any Wi-Fi/BLE functionality can be used.
 	err = WifiHost.LoadClm()
 	if err != nil {
-		os.Stdout.WriteString("Error: " + err.Error() + "\n")
+		fmt.Printf("Error loading CLM: %v\n", err)
 		errorState()
 		busyLoop()
 	}
@@ -210,7 +217,7 @@ func main() {
 	// Bring up the WLAN interface.
 	err = WifiHost.Up()
 	if err != nil {
-		os.Stdout.WriteString("Error: " + err.Error() + "\n")
+		fmt.Printf("Error bringing up Wi-Fi interface: %v\n", err)
 		errorState()
 		busyLoop()
 	}
@@ -218,7 +225,7 @@ func main() {
 	// Scan for Wi-Fi networks.
 	networks, err := WifiHost.ScanWifiNetworks()
 	if err != nil {
-		os.Stdout.WriteString("Error: " + err.Error() + "\n")
+		fmt.Printf("Error scanning for Wi-Fi networks: %v\n", err)
 		errorState()
 		busyLoop()
 	}
@@ -228,6 +235,42 @@ func main() {
 	}
 
 	use(networks)
+
+	// Join a WPA2 network.
+	fmt.Printf("Joining WPA2 network...\n")
+	err = WifiHost.JoinWPA2("waj334", "bigbluehooters")
+	if err != nil {
+		fmt.Printf("Error joining WPA2 network: %v\n", err)
+		errorState()
+		busyLoop()
+	}
+	fmt.Println("Joined!")
+
+	// Print the MAC address.
+	mac, err := WifiHost.MACAddress()
+	if err != nil {
+		fmt.Printf("Error getting MAC address: %v\n", err)
+		errorState()
+		busyLoop()
+	} else {
+		fmt.Printf("MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+			mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
+	}
+
+	// Register the WiFi driver as a net device to enable LWIP networking.
+	// DHCP will start automatically.
+	ni := net.RegisterNetDevice(WifiHost)
+
+	// Wait for DHCP to assign an IP address.
+	fmt.Println("Waiting for IP address...")
+	for {
+		ip := ni.IPAddress()
+		if ip != ([4]byte{}) {
+			fmt.Printf("IP: %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3])
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 
 	goodState()
 	busyLoop()

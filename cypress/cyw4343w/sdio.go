@@ -174,6 +174,10 @@ func (c *Cyw4343w[SDIO]) transferBlocks(transfer DataTransfer, write bool) error
 		if r5.Flags()&sdio.R5ErrorBits != 0 {
 			return sdio.ErrCommandFail
 		}
+
+		if !write {
+			copy(transfer.Data[fullBlockBytes:], b[:remaining])
+		}
 	}
 
 	return nil

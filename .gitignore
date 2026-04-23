@@ -31,3 +31,4 @@ go.work.sum
 .idea/
 .vscode/
 /cypress/cyw4343w/example/bin/
+/.claude/

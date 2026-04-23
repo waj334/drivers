@@ -9,6 +9,11 @@ const (
 	asynceventHeader = 1
 	controlHeader    = 0
 
+	// BDC (Broadcom Dongle Communication) header flags.
+	bdcVersion      = 2
+	bdcVersionShift = 4
+	bdcFlagVersion  = bdcVersion << bdcVersionShift // 0x20
+
 	cdcfIocError   = 0x01       // 0=success, 1=ioctl cmd failed.
 	cdcfIocIfMask  = 0xF000     // I/F index.
 	cdcfIocIfShift = 12         // # of bits of shift for I/F Mask.
@@ -1107,3 +1112,23 @@ const (
 	whdScanTypeProhibitedChannels scanType = 0x04 /**< Permit (passively) scanning a channel that isn't valid for the current country  */
 	whdScanTypeNoBssidFilter      scanType = 0x08 /**< Return a scan record for each beacon or probe response RX'ed                    */
 )
+
+// WPA auth mode values for wlcSetWpaAuth IOCTL.
+const (
+	wpaAuthDisabled uint32 = 0x0000
+	wpaAuthPsk      uint32 = 0x0004
+	wpa2AuthPsk     uint32 = 0x0080
+	wpa2AuthFt      uint32 = 0x1000
+)
+
+// wsec_pmk_t flags.
+const (
+	wsecPassphrase uint16 = 0x01
+)
+
+// wsec_pmk_t — passphrase/PMK structure for wlcSetWsecPmk.
+type wsecPmkType struct {
+	keyLen uint16
+	flags  uint16
+	key    [64]byte
+}

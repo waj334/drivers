@@ -1,6 +1,8 @@
 package cyw4343w
 
 import (
+	"fmt"
+	"os"
 	"time"
 	"unsafe"
 
@@ -36,10 +38,14 @@ func (c *Cyw4343w[SDIO]) updateCredit(data []byte) {
 	header := (*sdpcmSwHeaderType)(unsafe.Pointer(&data[4]))
 	if (header.channelAndFlags & 0x0F) < 3 {
 		txSeqMax = header.busDataCredit
+		oldMax := c.txMax
 		if txSeqMax-c.txSeq > 0x40 {
 			txSeqMax = c.txSeq + 2
 		}
 		c.txMax = txSeqMax
+		if txSeqMax != oldMax && c.debug {
+			fmt.Fprintf(os.Stdout, "[CREDIT] update: seq=%d oldMax=%d newMax=%d\n", c.txSeq, oldMax, txSeqMax)
+		}
 	}
 }
 
@@ -54,13 +60,23 @@ func (c *Cyw4343w[SDIO]) waitForCredits() error {
 		return nil
 	}
 
+	if c.debug {
+		fmt.Fprintf(os.Stdout, "[CREDIT] waiting: seq=%d max=%d\n", c.txSeq, c.txMax)
+	}
+
 	deadline := time.Now().Add(defaultTimeout)
 	for {
 		if c.hasCredit() {
+			if c.debug {
+				fmt.Fprintf(os.Stdout, "[CREDIT] acquired: seq=%d max=%d\n", c.txSeq, c.txMax)
+			}
 			return nil
 		}
 
 		if time.Now().After(deadline) {
+			if c.debug {
+				fmt.Fprintf(os.Stdout, "[CREDIT] TIMEOUT: seq=%d max=%d\n", c.txSeq, c.txMax)
+			}
 			return sdio.ErrTimeout
 		}
 
@@ -104,15 +120,24 @@ func (c *Cyw4343w[SDIO]) processRxPacket(data []byte) error {
 		return nil
 	}
 	packet := data[dataOffset:]
-	switch header.channelAndFlags & 0x0F {
+	ch := header.channelAndFlags & 0x0F
+	switch ch {
 	case controlHeader:
 		return c.processIoctl(packet)
 	case dataHeader:
+		if c.debug {
+			fmt.Fprintf(os.Stdout, "[POLL] rx data frame, len=%d\n", size)
+		}
 		return c.processData(packet)
 	case asynceventHeader:
+		if c.debug {
+			fmt.Fprintf(os.Stdout, "[POLL] rx async event, len=%d\n", size)
+		}
 		return c.processAsync(packet)
 	default:
-		// Silently ignore unhandled channels (e.g. glom/aggregation).
+		if c.debug {
+			fmt.Fprintf(os.Stdout, "[POLL] rx unknown channel=%d, len=%d\n", ch, size)
+		}
 		return nil
 	}
 }

@@ -9,6 +9,9 @@ const (
 	errCoreIsNotUp            _error = "core is not up"
 	errTimeout                _error = "timeout"
 	errIoctlFailed            _error = "ioctl failed"
+	errJoinFailed             _error = "wifi join failed"
+	errPassphraseTooLong      _error = "passphrase exceeds 64 bytes"
+	errSSIDTooLong            _error = "SSID exceeds 32 bytes"
 )
 
 type _error string

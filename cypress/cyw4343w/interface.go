@@ -20,7 +20,7 @@ const (
 	backplaneFunction busFunctionType = 1
 	wlanFunction      busFunctionType = 2
 
-	defaultTimeout = 100 * time.Millisecond
+	defaultTimeout = 500 * time.Millisecond
 	htTimeout      = 2500 * time.Millisecond
 
 	blockSize = 64
@@ -31,6 +31,7 @@ type Config[Host sdio.Host] struct {
 	Firmware []byte
 	Nvram    []byte
 	Clm      []byte
+	Debug    bool
 }
 
 type Cyw4343w[Host sdio.Host] struct {
@@ -46,10 +47,13 @@ type Cyw4343w[Host sdio.Host] struct {
 	txMax                             uint8
 	busSleepEnabled                   bool
 	busIsUp                           bool
+	rxCallback                        func([]byte)
 
 	firmware []byte
 	nvram    []byte
 	clm      []byte
+
+	debug bool
 
 	mutex           sync.Mutex
 	iovarMutex      sync.Mutex
@@ -97,6 +101,7 @@ func (c *Cyw4343w[SDIO]) Configure(config Config[SDIO]) error {
 	c.firmware = config.Firmware
 	c.nvram = config.Nvram
 	c.clm = config.Clm
+	c.debug = config.Debug
 
 	c.mutex.Unlock()
 	return nil
@@ -459,7 +464,13 @@ func (c *Cyw4343w[SDIO]) LoadClm() error {
 	}
 
 	const clmHeaderLength = int(unsafe.Sizeof(clmHeaderType{}))
-	const maxLoadLen = 512 - clmHeaderLength
+	// maxLoadLen is chosen so that the total iovar buffer (SDPCM + ioctl headers +
+	// name + CLM header + payload) is exactly 512 bytes = 8 × 64-byte SDIO blocks.
+	// This avoids a remainder block in transferBlocks whose make([]byte, 64) may
+	// land in DTCM (not IDMA-accessible), forcing a PIO fallback.
+	// Total = roundUp(ioctlCommandHeaderLength(28) + nameLen(8) + clmHeaderLength(12) + maxLoadLen, 4)
+	//       = roundUp(48 + 464, 4) = 512
+	const maxLoadLen = 464
 	var buffer [maxLoadLen + clmHeaderLength]byte
 
 	offset := 0
@@ -491,11 +502,19 @@ func (c *Cyw4343w[SDIO]) LoadClm() error {
 
 		header.flag = flags
 
-		copy(buffer[clmHeaderLength:], payload[:n])
+		copy(buffer[clmHeaderLength:clmHeaderLength+n], payload[:n])
 		payload = payload[n:]
 
-		// NOTE: send only header+n, not the whole scratch buffer.
-		if _, err := c.SetIovar(IovarStrClmload, buffer[:clmHeaderLength+n]); err != nil {
+		// Clear any stale data beyond the current chunk so the padding is
+		// deterministic when we send the full buffer for block alignment.
+		for i := clmHeaderLength + n; i < len(buffer); i++ {
+			buffer[i] = 0
+		}
+
+		// Always send the full buffer so the iovar frame is block-aligned for
+		// DMA. The firmware uses header.length (not the frame size) to determine
+		// the actual CLM chunk size, so trailing zeros are ignored.
+		if _, err := c.SetIovar(IovarStrClmload, buffer[:]); err != nil {
 			return err
 		}
 		offset += n

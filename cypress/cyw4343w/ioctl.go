@@ -38,6 +38,11 @@ func ioctlTransfer(data []byte) DataTransfer {
 	}
 }
 
+func ioctlPacket[T any](value T) ([]byte, *T) {
+	buf := make([]byte, int(ioctlCommandHeaderLength)+int(unsafe.Sizeof(value)))
+	return buf, (*T)(unsafe.Pointer(&buf[ioctlCommandHeaderLength]))
+}
+
 func (c *Cyw4343w[SDIO]) sendIoctl(cmd ioctlCommandType) ([]byte, error) {
 	if len(cmd.data) < int(ioctlCommandHeaderLength) {
 		return nil, errInvalidCommand
@@ -99,7 +104,7 @@ func (c *Cyw4343w[SDIO]) sendIoctl(cmd ioctlCommandType) ([]byte, error) {
 	}
 
 	// Wait for the response. The background polling goroutine will populate the receive queue.
-	deadline := time.Now().Add(defaultTimeout)
+	deadline := time.Now().Add(defaultTimeout * 2)
 	for {
 		response, ok := c.receiveQueue.Dequeue(ioctlId)
 		if ok {

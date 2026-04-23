@@ -2,6 +2,8 @@ package cyw4343w
 
 import (
 	"encoding/binary"
+	"fmt"
+	"os"
 	"unsafe"
 
 	"pkg.si-go.dev/chip/core/hal"
@@ -46,6 +48,9 @@ func (c *Cyw4343w[SDIO]) poll() error {
 	if available {
 		err = c.receiveOnePacket()
 		if err != nil {
+			if c.debug {
+				fmt.Fprintf(os.Stdout, "[POLL] receiveOnePacket error: %s\n", err.Error())
+			}
 			return err
 		}
 	}
@@ -82,6 +87,9 @@ func (c *Cyw4343w[SDIO]) readFrame() ([]byte, error) {
 	}
 
 	if hwTag[0] == 12 && c.busIsUp {
+		if c.debug {
+			fmt.Fprintf(os.Stdout, "[POLL] credit-only packet\n")
+		}
 		var creditBuf [8]byte
 		err = c.read(ioTransfer(creditBuf[:]))
 		if err != nil {
