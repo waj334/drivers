@@ -2,8 +2,11 @@ package main
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"time"
 
@@ -271,6 +274,25 @@ func main() {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+
+	// Dump google.com to Stdout.
+	resp, err := http.Get("http://httpforever.com")
+	if err != nil {
+		fmt.Printf("GET error: %s\n", err)
+		errorState()
+		busyLoop()
+	}
+
+	_, err = io.Copy(os.Stdout, &resp.Body)
+	if err != nil && !errors.Is(err, io.EOF) {
+		fmt.Println("EOF")
+		fmt.Printf("Copy error: %s\n", err)
+		_ = resp.Body.Close()
+		errorState()
+		busyLoop()
+	}
+
+	_ = resp.Body.Close()
 
 	goodState()
 	busyLoop()
