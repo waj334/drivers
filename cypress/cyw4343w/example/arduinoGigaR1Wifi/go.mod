@@ -2,7 +2,7 @@ module pkg.si-go.dev/drivers/cypress/cyw4343w/example
 
 replace pkg.si-go.dev/chip => /home/waj334/Projects/chip
 
-replace pkg.si-go.dev/drivers => ../../..
+replace pkg.si-go.dev/drivers => ../../../..
 
 go 1.26.1
 

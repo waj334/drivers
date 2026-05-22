@@ -32,3 +32,8 @@ go.work.sum
 .vscode/
 /cypress/cyw4343w/example/bin/
 /.claude/
+/cypress/cyw4343w/example/arduinoGigaR1Wifi/bin/firmware.elf
+/cypress/cyw4343w/example/arduinoGigaR1Wifi/bin/firmware.elf.dump.ll
+/cypress/cyw4343w/example/arduinoGigaR1Wifi/bin/firmware.elf.dump.llvm.mlir
+/cypress/cyw4343w/example/arduinoGigaR1Wifi/bin/firmware.elf.dump.mlir
+/cypress/cyw4343w/example/arduinoGigaR1Wifi/bin/firmware.elf.dump.opt.ll

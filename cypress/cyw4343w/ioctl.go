@@ -43,33 +43,27 @@ func ioctlPacket[T any](value T) ([]byte, *T) {
 	return buf, (*T)(unsafe.Pointer(&buf[ioctlCommandHeaderLength]))
 }
 
-func (c *Cyw4343w[SDIO]) sendIoctl(cmd ioctlCommandType) ([]byte, error) {
+func (c *Cyw4343w[HostT, CacheT]) sendIoctl(cmd ioctlCommandType) (BufferHandle, error) {
 	if len(cmd.data) < int(ioctlCommandHeaderLength) {
-		return nil, errInvalidCommand
+		return BufferHandle{}, errInvalidCommand
 	}
 
 	c.iovarMutex.Lock()
 
-	// Ensure the bus is awake before sending.
 	if err := c.busWake(); err != nil {
 		c.iovarMutex.Unlock()
-		return nil, err
+		return BufferHandle{}, err
 	}
 
-	// Wait for TX credits before sending.
 	if err := c.waitForCredits(); err != nil {
 		c.iovarMutex.Unlock()
-		return nil, err
+		return BufferHandle{}, err
 	}
 
 	ioctlId := c.requestId()
 	totalLength := uint16(len(cmd.data))
-
-	// NOTE: The data parameter already includes memory to store the header. So, subtract the length of the header to
-	//       derive the length of the data payload.
 	dataLength := totalLength - uint16(ioctlCommandHeaderLength)
 
-	// Prepare the SDPCM Header.
 	header := (*ioctlCommandHeaderType)(unsafe.Pointer(&cmd.data[0]))
 	*header = ioctlCommandHeaderType{
 		sdpcmHeaderType: sdpcmHeaderType{
@@ -96,38 +90,45 @@ func (c *Cyw4343w[SDIO]) sendIoctl(cmd ioctlCommandType) ([]byte, error) {
 
 	c.txSeq++
 
-	// Send the IOCTL command.
+	c.controlPool.PrepareTx(cmd.data)
 	err := c.write(ioctlTransfer(cmd.data))
 	if err != nil {
 		c.iovarMutex.Unlock()
-		return nil, err
+		return BufferHandle{}, err
 	}
 
-	// Wait for the response. The background polling goroutine will populate the receive queue.
 	deadline := time.Now().Add(defaultTimeout * 2)
 	for {
-		response, ok := c.receiveQueue.Dequeue(ioctlId)
+		responseHandle, ok := c.receiveQueue.Dequeue(ioctlId)
 		if ok {
+			response := responseHandle.Data
+			header := *(*ioctlHeaderType)(unsafe.Pointer(&response[0]))
+
 			c.iovarMutex.Unlock()
-			header := (*ioctlHeaderType)(unsafe.Pointer(&response[0]))
+
 			if int32(header.status) != 0 {
-				return nil, errIoctlFailed
+				responseHandle.Close()
+				return BufferHandle{}, errIoctlFailed
 			}
-			return response[ioctlHeaderLength:], nil
+
+			return BufferHandle{
+				Data:    response[ioctlHeaderLength:],
+				release: responseHandle.release,
+			}, nil
 		}
 
 		if time.Now().After(deadline) {
 			c.iovarMutex.Unlock()
-			return nil, sdio.ErrTimeout
+			return BufferHandle{}, sdio.ErrTimeout
 		}
 
 		time.Sleep(time.Millisecond)
 	}
 }
 
-func (c *Cyw4343w[SDIO]) processIoctl(data []byte) error {
-	header := *((*ioctlHeaderType)(unsafe.Pointer(&data[0])))
+func (c *Cyw4343w[HostT, CacheT]) processIoctl(handle BufferHandle) error {
+	header := *((*ioctlHeaderType)(unsafe.Pointer(&handle.Data[0])))
 	id := (header.flags & cdcfIocIdMask) >> cdcfIocIdShift
-	c.receiveQueue.Insert(id, data)
+	c.receiveQueue.Insert(id, handle)
 	return nil
 }

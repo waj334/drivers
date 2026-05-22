@@ -1,55 +1,97 @@
 package cyw4343w
 
-func (c *Cyw4343w[SDIO]) SetIovar(name string, data []byte) ([]byte, error) {
+import (
+	"sync"
+
+	"pkg.si-go.dev/chip/core/hal"
+)
+
+func (c *Cyw4343w[HostT, CacheT]) SetIovar(name string, data []byte) (BufferHandle, error) {
 	// Allocate the buffer.
-	buffer, payload := iovarBuffer(name, len(data))
+	buffer, payload, err := c.iovarBuffer(name, len(data))
+	if err != nil {
+		return BufferHandle{}, err
+	}
 
 	// Copy the input data into the payload.
-	copy(payload, data)
+	copy(payload.Data, data)
 
 	// Write the iovar.
 	response, err := c.sendIoctl(ioctlCommandType{
 		cmd:     wlcSetVar,
 		cmdType: cdcSet,
-		data:    buffer,
+		data:    buffer.Data,
 	})
 
+	// Release the buffer back to the pool.
+	buffer.Close()
+
 	if err != nil {
-		return nil, err
+		return BufferHandle{}, err
 	}
 
 	return response, nil
 }
 
-func (c *Cyw4343w[SDIO]) Iovar(name string, dataLen int) ([]byte, error) {
+func (c *Cyw4343w[HostT, CacheT]) Iovar(name string, dataLen int) (BufferHandle, error) {
 	// Allocate the buffer.
-	buffer, _ := iovarBuffer(name, dataLen)
+	buffer, _, err := c.iovarBuffer(name, dataLen)
+	if err != nil {
+		return BufferHandle{}, err
+	}
 
 	// Read the iovar from the device.
 	response, err := c.sendIoctl(ioctlCommandType{
-		data:    buffer,
+		data:    buffer.Data,
 		cmdType: cdcGet,
 		cmd:     wlcGetVar,
 	})
 
+	// Release the buffer back to the pool.
+	buffer.Close()
+
 	if err != nil {
-		return nil, err
+		return BufferHandle{}, err
 	}
 
 	return response, nil
 }
 
-func iovarBuffer(name string, dataLen int) (buffer []byte, data []byte) {
-	nameLen := len(name) + 1 // +1 for null terminator
-	totalLen := roundUp(int(ioctlCommandHeaderLength)+nameLen+dataLen, 4)
+func (c *Cyw4343w[HostT, CacheT]) iovarBuffer(name string, dataLen int) (BufferHandle, BufferHandle, error) {
+	nameLen := len(name) + 1
+	totalLen := uintptr(roundUp(int(ioctlCommandHeaderLength)+nameLen+dataLen, 4))
 
-	buffer = make([]byte, totalLen)
+	if totalLen > c.controlPool.SlotSize() {
+		return BufferHandle{}, BufferHandle{}, hal.ErrInvalidBuffer
+	}
 
-	// Copy name in the buffer.
-	copy(buffer[ioctlCommandHeaderLength:], name)
+	slot := c.controlPool.Get()
+	if slot == nil {
+		return BufferHandle{}, BufferHandle{}, hal.ErrInvalidBuffer
+	}
+	buf := slot[:totalLen]
+	// Zero is important — leftover bytes from a previous use would corrupt
+	// the iovar string (no null terminator, garbage payload).
+	for i := range buf {
+		buf[i] = 0
+	}
+	copy(buf[ioctlCommandHeaderLength:], name)
 
-	// Data is immediately after the string.
-	data = buffer[int(ioctlCommandHeaderLength)+nameLen:]
+	data := buf[int(ioctlCommandHeaderLength)+nameLen:]
 
-	return buffer, data
+	// Use sync once to prevent either handle from returning the same buffer twice.
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			c.controlPool.Put(slot)
+		})
+	}
+
+	return BufferHandle{
+			Data:    buf,
+			release: release,
+		}, BufferHandle{
+			Data:    data,
+			release: release,
+		}, nil
 }

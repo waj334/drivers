@@ -12,6 +12,7 @@ const (
 	errJoinFailed             _error = "wifi join failed"
 	errPassphraseTooLong      _error = "passphrase exceeds 64 bytes"
 	errSSIDTooLong            _error = "SSID exceeds 32 bytes"
+	errPoolExhausted          _error = "pool exhausted"
 )
 
 type _error string

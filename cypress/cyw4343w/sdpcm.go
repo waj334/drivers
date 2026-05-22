@@ -33,7 +33,7 @@ type sdpcmSwHeaderType struct {
 	_                   [2]uint8
 }
 
-func (c *Cyw4343w[SDIO]) updateCredit(data []byte) {
+func (c *Cyw4343w[HostT, CacheT]) updateCredit(data []byte) {
 	var txSeqMax uint8
 	header := (*sdpcmSwHeaderType)(unsafe.Pointer(&data[4]))
 	if (header.channelAndFlags & 0x0F) < 3 {
@@ -50,12 +50,12 @@ func (c *Cyw4343w[SDIO]) updateCredit(data []byte) {
 }
 
 // hasCredit returns true if the driver has TX credit available to send a packet.
-func (c *Cyw4343w[SDIO]) hasCredit() bool {
+func (c *Cyw4343w[HostT, CacheT]) hasCredit() bool {
 	return c.txSeq != c.txMax
 }
 
 // waitForCredits waits until a TX credit is available. The background polling goroutine updates credits.
-func (c *Cyw4343w[SDIO]) waitForCredits() error {
+func (c *Cyw4343w[HostT, CacheT]) waitForCredits() error {
 	if c.hasCredit() {
 		return nil
 	}
@@ -84,8 +84,8 @@ func (c *Cyw4343w[SDIO]) waitForCredits() error {
 	}
 }
 
-func (c *Cyw4343w[SDIO]) processRxPacket(data []byte) error {
-	header := *((*sdpcmHeaderType)(unsafe.Pointer(&data[0])))
+func (c *Cyw4343w[HostT, CacheT]) processRxPacket(handle BufferHandle) error {
+	header := *((*sdpcmHeaderType)(unsafe.Pointer(&handle.Data[0])))
 
 	// Extract the total SDPCM packet size from the first two frametag bytes.
 	size := header.frameTag[0]
@@ -93,21 +93,24 @@ func (c *Cyw4343w[SDIO]) processRxPacket(data []byte) error {
 	// Check that the second two frametag bytes are the binary inverse of the size.
 	sizeInv := ^size
 	if header.frameTag[1] != sizeInv {
+		handle.Close()
 		return hal.ErrInvalidBuffer
 	}
 
 	// Check whether the packet is big enough to contain the SDPCM header OR if it is too big to handle.
-	if size < uint16(sdpcmHeaderLength) || int(size) > len(data) {
+	if size < uint16(sdpcmHeaderLength) || int(size) > len(handle.Data) {
+		handle.Close()
 		return hal.ErrInvalidBuffer
 	}
 
 	if size == uint16(sdpcmHeaderLength) {
 		// This is a flow control packet with no data.
+		handle.Close()
 		return nil
 	}
 
 	// Update credits.
-	c.updateCredit(data)
+	c.updateCredit(handle.Data)
 
 	// Use the header_length field as the data offset — the firmware may include
 	// extension headers or padding beyond the fixed 12-byte SDPCM header.
@@ -117,10 +120,16 @@ func (c *Cyw4343w[SDIO]) processRxPacket(data []byte) error {
 	}
 	if dataOffset >= size {
 		// The header_length exceeds the packet — nothing to process.
+		handle.Close()
 		return nil
 	}
-	packet := data[dataOffset:]
+
 	ch := header.channelAndFlags & 0x0F
+	packet := BufferHandle{
+		Data:    handle.Data[dataOffset:],
+		release: handle.release,
+	}
+
 	switch ch {
 	case controlHeader:
 		return c.processIoctl(packet)
@@ -138,6 +147,7 @@ func (c *Cyw4343w[SDIO]) processRxPacket(data []byte) error {
 		if c.debug {
 			fmt.Fprintf(os.Stdout, "[POLL] rx unknown channel=%d, len=%d\n", ch, size)
 		}
+		packet.Close()
 		return nil
 	}
 }

@@ -1,7 +1,10 @@
 package cyw4343w
 
 import (
+	"cache"
 	"encoding/binary"
+	"net"
+	"pool"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,24 +23,29 @@ const (
 	backplaneFunction busFunctionType = 1
 	wlanFunction      busFunctionType = 2
 
-	defaultTimeout = 500 * time.Millisecond
+	//defaultTimeout = 500 * time.Millisecond
+	defaultTimeout = 5000 * time.Second
 	htTimeout      = 2500 * time.Millisecond
 
 	blockSize = 64
 )
 
-type Config[Host sdio.Host] struct {
-	Host     Host
+type Config[HostT sdio.Host, CacheT cache.CacheOps] struct {
+	Host     HostT
 	Firmware []byte
 	Nvram    []byte
 	Clm      []byte
 	Debug    bool
+
+	TxPool      *pool.FixedPool[CacheT]
+	RxPool      *pool.FixedPool[CacheT]
+	ControlPool *pool.FixedPool[CacheT]
 }
 
-type Cyw4343w[Host sdio.Host] struct {
-	host         Host
-	receiveQueue queue
-	eventQueue   queue
+type Cyw4343w[HostT sdio.Host, CacheT cache.CacheOps] struct {
+	host         HostT
+	receiveQueue queue[BufferHandle]
+	events       Dispatcher[AsyncEvent]
 
 	requestIdCounter                  uint32
 	bsscIndex                         uint32 // Leaving at 0 for now.
@@ -47,7 +55,11 @@ type Cyw4343w[Host sdio.Host] struct {
 	txMax                             uint8
 	busSleepEnabled                   bool
 	busIsUp                           bool
-	rxCallback                        func([]byte)
+	rxCallback                        func(frame net.RxFrame)
+
+	txPool      *pool.FixedPool[CacheT]
+	rxPool      *pool.FixedPool[CacheT]
+	controlPool *pool.FixedPool[CacheT]
 
 	firmware []byte
 	nvram    []byte
@@ -61,25 +73,22 @@ type Cyw4343w[Host sdio.Host] struct {
 	eventQueueMutex sync.Mutex
 }
 
-func New[Host sdio.Host]() *Cyw4343w[Host] {
+func New[Host sdio.Host, CacheT cache.CacheOps]() *Cyw4343w[Host, CacheT] {
 	// Create an instance of the driver.
-	c := &Cyw4343w[Host]{
+	c := &Cyw4343w[Host, CacheT]{
 		requestIdCounter: 1,
 		txSeq:            1,
 	}
 
 	// Initialize the queues.
-	c.receiveQueue = queue{
+	c.receiveQueue = queue[BufferHandle]{
 		mutex: &c.queueMutex,
-	}
-	c.eventQueue = queue{
-		mutex: &c.eventQueueMutex,
 	}
 
 	return c
 }
 
-func (c *Cyw4343w[SDIO]) Configure(config Config[SDIO]) error {
+func (c *Cyw4343w[HostT, CacheT]) Configure(config Config[HostT, CacheT]) error {
 	c.mutex.Lock()
 
 	if len(config.Firmware) == 0 {
@@ -103,11 +112,15 @@ func (c *Cyw4343w[SDIO]) Configure(config Config[SDIO]) error {
 	c.clm = config.Clm
 	c.debug = config.Debug
 
+	c.txPool = config.TxPool
+	c.rxPool = config.RxPool
+	c.controlPool = config.ControlPool
+
 	c.mutex.Unlock()
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) Initialize() error {
+func (c *Cyw4343w[HostT, CacheT]) Initialize() error {
 	c.mutex.Lock()
 
 	// Initialize the backplane.
@@ -121,7 +134,7 @@ func (c *Cyw4343w[SDIO]) Initialize() error {
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) InitializeCard() error {
+func (c *Cyw4343w[HostT, CacheT]) InitializeCard() error {
 	c.mutex.Lock()
 
 	var resp sdio.Response
@@ -218,7 +231,7 @@ func (c *Cyw4343w[SDIO]) InitializeCard() error {
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) initBackplane() error {
+func (c *Cyw4343w[HostT, CacheT]) initBackplane() error {
 	// Enable the backplane.
 	deadline := time.Now().Add(defaultTimeout)
 	_ = deadline
@@ -451,7 +464,7 @@ func (c *Cyw4343w[SDIO]) initBackplane() error {
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) LoadClm() error {
+func (c *Cyw4343w[HostT, CacheT]) LoadClm() error {
 	type clmHeaderType struct {
 		flag   uint16
 		typ    uint16
@@ -514,16 +527,19 @@ func (c *Cyw4343w[SDIO]) LoadClm() error {
 		// Always send the full buffer so the iovar frame is block-aligned for
 		// DMA. The firmware uses header.length (not the frame size) to determine
 		// the actual CLM chunk size, so trailing zeros are ignored.
-		if _, err := c.SetIovar(IovarStrClmload, buffer[:]); err != nil {
+		handle, err := c.SetIovar(IovarStrClmload, buffer[:])
+		if err != nil {
 			return err
 		}
+
+		handle.Close()
 		offset += n
 	}
 
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) downloadFirmware() error {
+func (c *Cyw4343w[HostT, CacheT]) downloadFirmware() error {
 	ramStartAddress := atcmRamBaseAddress(c.chipId)
 	if ramStartAddress != 0 {
 		// For chips with ATCM RAM (e.g. CYW4373, CYW43909), halt and reset the ARM core.
@@ -639,7 +655,7 @@ func (c *Cyw4343w[SDIO]) downloadFirmware() error {
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) writeBackplaneValue(address uint32, length uint8, value uint32) error {
+func (c *Cyw4343w[HostT, CacheT]) writeBackplaneValue(address uint32, length uint8, value uint32) error {
 	err := c.setBackplaneWindow(address)
 	if err != nil {
 		return err
@@ -663,7 +679,7 @@ func (c *Cyw4343w[SDIO]) writeBackplaneValue(address uint32, length uint8, value
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) readBackplaneValue(address uint32, length uint8) (uint32, error) {
+func (c *Cyw4343w[HostT, CacheT]) readBackplaneValue(address uint32, length uint8) (uint32, error) {
 	err := c.setBackplaneWindow(address)
 	if err != nil {
 		return 0, err
@@ -699,7 +715,7 @@ func (c *Cyw4343w[SDIO]) readBackplaneValue(address uint32, length uint8) (uint3
 	return binary.LittleEndian.Uint32(data[:]) & mask, nil
 }
 
-func (c *Cyw4343w[SDIO]) writeBackplaneBytes(address uint32, data []byte) error {
+func (c *Cyw4343w[HostT, CacheT]) writeBackplaneBytes(address uint32, data []byte) error {
 	if err := c.busWake(); err != nil {
 		return err
 	}
@@ -751,7 +767,7 @@ func (c *Cyw4343w[SDIO]) writeBackplaneBytes(address uint32, data []byte) error 
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) readBackplaneBytes(address uint32, data []byte) error {
+func (c *Cyw4343w[HostT, CacheT]) readBackplaneBytes(address uint32, data []byte) error {
 	if err := c.busWake(); err != nil {
 		return err
 	}
@@ -809,7 +825,7 @@ func (c *Cyw4343w[SDIO]) readBackplaneBytes(address uint32, data []byte) error {
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) setBackplaneWindow(addr uint32) error {
+func (c *Cyw4343w[HostT, CacheT]) setBackplaneWindow(addr uint32) error {
 	const upperMask32 = uint32(0xFF00_0000)
 	const upperMiddleMask32 = uint32(0x00FF_0000)
 	const lowerMiddleMask32 = uint32(0x0000_FF00)
@@ -864,7 +880,7 @@ func (c *Cyw4343w[SDIO]) setBackplaneWindow(addr uint32) error {
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) writeRegisterValue(function busFunctionType, address uint32, length uint8, value uint32) error {
+func (c *Cyw4343w[HostT, CacheT]) writeRegisterValue(function busFunctionType, address uint32, length uint8, value uint32) error {
 	var data [4]byte
 	binary.LittleEndian.PutUint32(data[:], value)
 	return c.write(DataTransfer{
@@ -874,7 +890,7 @@ func (c *Cyw4343w[SDIO]) writeRegisterValue(function busFunctionType, address ui
 	})
 }
 
-func (c *Cyw4343w[SDIO]) readRegisterValue(function busFunctionType, address uint32, length uint8) (uint32, error) {
+func (c *Cyw4343w[HostT, CacheT]) readRegisterValue(function busFunctionType, address uint32, length uint8) (uint32, error) {
 	var data [4]byte
 	err := c.read(DataTransfer{
 		Data:     data[:min(4, length)],
@@ -889,11 +905,11 @@ func (c *Cyw4343w[SDIO]) readRegisterValue(function busFunctionType, address uin
 	return binary.LittleEndian.Uint32(data[:]), nil
 }
 
-func (c *Cyw4343w[SDIO]) requestId() uint32 {
+func (c *Cyw4343w[HostT, CacheT]) requestId() uint32 {
 	return atomic.AddUint32(&c.requestIdCounter, 1)
 }
 
-func (c *Cyw4343w[SDIO]) chipSpecificSocsramInit() error {
+func (c *Cyw4343w[HostT, CacheT]) chipSpecificSocsramInit() error {
 	switch c.chipId {
 	case 43430, 43439:
 		const sramBase = 0x18000000 + 0x4000
@@ -913,7 +929,7 @@ func (c *Cyw4343w[SDIO]) chipSpecificSocsramInit() error {
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) enableSaveRestore() error {
+func (c *Cyw4343w[HostT, CacheT]) enableSaveRestore() error {
 	ok, err := c.isFwSrCapable()
 	if err != nil {
 		return err
@@ -965,7 +981,7 @@ func (c *Cyw4343w[SDIO]) enableSaveRestore() error {
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) isFwSrCapable() (bool, error) {
+func (c *Cyw4343w[HostT, CacheT]) isFwSrCapable() (bool, error) {
 	srCtrl, err := c.readBackplaneValue(chipcommonBaseAddress+0x508, 4)
 	if err != nil {
 		return false, err
@@ -975,7 +991,7 @@ func (c *Cyw4343w[SDIO]) isFwSrCapable() (bool, error) {
 
 // busWake ensures the SDIO bus is awake and ready for backplane access.
 // This must be called before any backplane register read/write when save/restore is enabled.
-func (c *Cyw4343w[SDIO]) busWake() error {
+func (c *Cyw4343w[HostT, CacheT]) busWake() error {
 	if !c.busSleepEnabled {
 		return nil
 	}
@@ -1007,7 +1023,7 @@ func (c *Cyw4343w[SDIO]) busWake() error {
 }
 
 // busSleep puts the SDIO bus into low-power mode when idle.
-func (c *Cyw4343w[SDIO]) busSleep() error {
+func (c *Cyw4343w[HostT, CacheT]) busSleep() error {
 	if !c.busSleepEnabled {
 		return nil
 	}
@@ -1017,7 +1033,7 @@ func (c *Cyw4343w[SDIO]) busSleep() error {
 }
 
 // ensureBackplaneUp verifies that WLAN function F2 is ready for data transfer.
-func (c *Cyw4343w[SDIO]) ensureBackplaneUp() (bool, error) {
+func (c *Cyw4343w[HostT, CacheT]) ensureBackplaneUp() (bool, error) {
 	if c.busIsUp {
 		return true, nil
 	}

@@ -21,7 +21,7 @@ const (
 	wlanCoreFlagCpuHalt wlanCoreFlagType = 1
 )
 
-func (c *Cyw4343w[SDIO]) coreAddress(coreId coreType) (uint32, error) {
+func (c *Cyw4343w[HostT, CacheT]) coreAddress(coreId coreType) (uint32, error) {
 	switch coreId {
 	case wlanArmCore:
 		return armCoreBaseAddress(c.chipId), nil
@@ -34,7 +34,7 @@ func (c *Cyw4343w[SDIO]) coreAddress(coreId coreType) (uint32, error) {
 	}
 }
 
-func (c *Cyw4343w[SDIO]) disableDeviceCore(coreId coreType, coreFlag wlanCoreFlagType) error {
+func (c *Cyw4343w[HostT, CacheT]) disableDeviceCore(coreId coreType, coreFlag wlanCoreFlagType) error {
 	base, err := c.coreAddress(coreId)
 	if err != nil {
 		return err
@@ -85,7 +85,7 @@ func (c *Cyw4343w[SDIO]) disableDeviceCore(coreId coreType, coreFlag wlanCoreFla
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) resetDeviceCore(coreId coreType, coreFlag wlanCoreFlagType) error {
+func (c *Cyw4343w[HostT, CacheT]) resetDeviceCore(coreId coreType, coreFlag wlanCoreFlagType) error {
 	var temp uint32
 
 	base, err := c.coreAddress(coreId)
@@ -152,7 +152,7 @@ func (c *Cyw4343w[SDIO]) resetDeviceCore(coreId coreType, coreFlag wlanCoreFlagT
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) deviceCoreIsUp(coreId coreType) (bool, error) {
+func (c *Cyw4343w[HostT, CacheT]) deviceCoreIsUp(coreId coreType) (bool, error) {
 	base, err := c.coreAddress(coreId)
 	if err != nil {
 		return false, err

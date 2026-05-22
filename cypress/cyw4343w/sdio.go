@@ -16,15 +16,15 @@ var (
 	transferMutex sync.Mutex
 )
 
-func (c *Cyw4343w[SDIO]) write(transfer DataTransfer) error {
+func (c *Cyw4343w[HostT, CacheT]) write(transfer DataTransfer) error {
 	return c.transfer(transfer, true)
 }
 
-func (c *Cyw4343w[SDIO]) read(transfer DataTransfer) error {
+func (c *Cyw4343w[HostT, CacheT]) read(transfer DataTransfer) error {
 	return c.transfer(transfer, false)
 }
 
-func (c *Cyw4343w[SDIO]) transfer(transfer DataTransfer, write bool) error {
+func (c *Cyw4343w[HostT, CacheT]) transfer(transfer DataTransfer, write bool) error {
 	var resp sdio.Response
 	var err error
 
@@ -112,7 +112,7 @@ func (c *Cyw4343w[SDIO]) transfer(transfer DataTransfer, write bool) error {
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) transferBlocks(transfer DataTransfer, write bool) error {
+func (c *Cyw4343w[HostT, CacheT]) transferBlocks(transfer DataTransfer, write bool) error {
 	var resp sdio.Response
 	var err error
 	cmd := sdio.Command{

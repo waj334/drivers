@@ -2,20 +2,20 @@ package cyw4343w
 
 import "sync"
 
-type queue struct {
-	head  *queueEntry
+type queue[ElementT any] struct {
+	head  *queueEntry[ElementT]
 	mutex *sync.Mutex
 }
 
-type queueEntry struct {
-	next  *queueEntry
-	value []byte
+type queueEntry[ElementT any] struct {
+	next  *queueEntry[ElementT]
+	value ElementT
 	id    uint32
 }
 
-func (q *queue) Insert(id uint32, value []byte) {
+func (q *queue[ElementT]) Insert(id uint32, value ElementT) {
 	q.mutex.Lock()
-	entry := &queueEntry{
+	entry := &queueEntry[ElementT]{
 		value: value,
 		next:  q.head,
 		id:    id,
@@ -24,9 +24,9 @@ func (q *queue) Insert(id uint32, value []byte) {
 	q.mutex.Unlock()
 }
 
-func (q *queue) Dequeue(id uint32) ([]byte, bool) {
+func (q *queue[ElementT]) Dequeue(id uint32) (ElementT, bool) {
 	q.mutex.Lock()
-	var last *queueEntry
+	var last *queueEntry[ElementT]
 	curr := q.head
 	for curr != nil {
 		if curr.id == id {
@@ -47,5 +47,7 @@ func (q *queue) Dequeue(id uint32) ([]byte, bool) {
 		curr = curr.next
 	}
 	q.mutex.Unlock()
-	return nil, false
+
+	var zero ElementT
+	return zero, false
 }

@@ -45,3 +45,12 @@ type bcdHeaderType struct {
 	flags2     byte
 	dataOffset byte
 }
+
+type BufferHandle struct {
+	Data    []byte
+	release func()
+}
+
+func (b BufferHandle) Close() {
+	b.release()
+}

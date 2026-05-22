@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"sync"
 	"unsafe"
 
 	"pkg.si-go.dev/chip/core/hal"
@@ -18,7 +19,7 @@ func ioTransfer(data []byte) DataTransfer {
 }
 
 // abortRead sends an I/O abort to terminate a failed SDIO transfer on F2.
-func (c *Cyw4343w[SDIO]) abortRead() {
+func (c *Cyw4343w[HostT, CacheT]) abortRead() {
 	// Write to the CCCR I/O Abort register to abort the current F2 operation.
 	_ = c.writeRegisterValue(busFunction, sdiodCccrIoabort, 1, uint32(wlanFunction))
 
@@ -26,14 +27,14 @@ func (c *Cyw4343w[SDIO]) abortRead() {
 	_ = c.writeRegisterValue(backplaneFunction, sdioFrameControl, 1, sfcRfTerm)
 }
 
-func (c *Cyw4343w[SDIO]) Poll() error {
+func (c *Cyw4343w[HostT, CacheT]) Poll() error {
 	c.mutex.Lock()
 	err := c.poll()
 	c.mutex.Unlock()
 	return err
 }
 
-func (c *Cyw4343w[SDIO]) poll() error {
+func (c *Cyw4343w[HostT, CacheT]) poll() error {
 	// Ensure the bus is awake before polling.
 	if err := c.busWake(); err != nil {
 		return err
@@ -58,14 +59,14 @@ func (c *Cyw4343w[SDIO]) poll() error {
 	return nil
 }
 
-func (c *Cyw4343w[SDIO]) readFrame() ([]byte, error) {
+func (c *Cyw4343w[HostT, CacheT]) readFrame() (BufferHandle, error) {
 	// Check that the WLAN backplane is up before continuing.
 	up, err := c.ensureBackplaneUp()
 	if err != nil {
-		return nil, err
+		return BufferHandle{}, err
 	}
 	if !up {
-		return nil, nil
+		return BufferHandle{}, nil
 	}
 
 	var hwTag [2]uint16
@@ -75,7 +76,7 @@ func (c *Cyw4343w[SDIO]) readFrame() ([]byte, error) {
 	err = c.read(ioTransfer(bhwTag[:4]))
 	if err != nil {
 		c.abortRead()
-		return nil, err
+		return BufferHandle{}, err
 	}
 
 	length := binary.LittleEndian.Uint16(bhwTag[0:2])
@@ -83,7 +84,7 @@ func (c *Cyw4343w[SDIO]) readFrame() ([]byte, error) {
 
 	if (length|lengthCheck == 0) || (length^lengthCheck != 0xFFFF) {
 		// Drop this packet...
-		return nil, nil
+		return BufferHandle{}, nil
 	}
 
 	if hwTag[0] == 12 && c.busIsUp {
@@ -94,43 +95,62 @@ func (c *Cyw4343w[SDIO]) readFrame() ([]byte, error) {
 		err = c.read(ioTransfer(creditBuf[:]))
 		if err != nil {
 			c.abortRead()
-			return nil, err
+			return BufferHandle{}, err
 		}
 		c.updateCredit(creditBuf[:])
+		//return nil, nil
 	}
 
-	// Allocate a buffer to store the entire packet.
-	data := make([]byte, length)
+	if uintptr(length) > c.rxPool.SlotSize() {
+		return BufferHandle{}, hal.ErrInvalidBuffer
+	}
+
+	data := c.rxPool.Get()
+	if data == nil {
+		return BufferHandle{}, errPoolExhausted
+	}
 
 	// Copy data that was already read.
 	n := copy(data, bhwTag)
 
 	// Read the rest of the data.
 	if int(length) > n {
-		err = c.read(ioTransfer(data[n:]))
+		c.rxPool.CompleteRx(data[n:length])
+		err = c.read(ioTransfer(data[n:length]))
 		if err != nil {
-			return nil, err
+			c.rxPool.Put(data)
+			return BufferHandle{}, err
 		}
+
+		c.rxPool.CompleteRx(data[n:length])
 	}
-	return data, nil
+
+	var once sync.Once
+	return BufferHandle{
+		Data: data,
+		release: func() {
+			once.Do(func() { c.rxPool.Put(data) })
+		},
+	}, nil
 }
 
-func (c *Cyw4343w[SDIO]) receiveOnePacket() error {
-	data, err := c.readFrame()
+func (c *Cyw4343w[HostT, CacheT]) receiveOnePacket() error {
+	handle, err := c.readFrame()
 	if err != nil {
 		return err
 	}
 
-	if len(data) == 0 {
+	if len(handle.Data) == 0 {
 		// The packet was likely dropped.
 		return nil
 	}
 
 	// Process the packet.
-	return c.processRxPacket(data)
+	err = c.processRxPacket(handle)
+	return err
 }
 
-func (c *Cyw4343w[SDIO]) packetAvailableToRead() (bool, error) {
+func (c *Cyw4343w[HostT, CacheT]) packetAvailableToRead() (bool, error) {
 	base := sdiodCoreBaseAddress(c.chipId)
 
 	// Check that the WLAN backplane is up before continuing.

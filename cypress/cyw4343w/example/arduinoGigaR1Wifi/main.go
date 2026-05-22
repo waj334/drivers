@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -8,11 +9,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"pool"
 	"time"
 
 	_ "pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7"
 	stm32h7x7 "pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7"
-	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal"
 	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal/pin"
 	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal/sdio"
 	"pkg.si-go.dev/chip/arm/cortexm/platform/st/stm32h7x7/cm7/hal/timer"
@@ -40,6 +41,8 @@ const (
 	SDIO_CLK = pin.PC12
 	SDIO_CMD = pin.PD2
 
+	sdioFrequency = 50_000_000 // 50 Mhz
+
 	timescale = uint64(time.Microsecond)
 )
 
@@ -53,15 +56,13 @@ var clm []byte
 var nvram []byte
 
 var (
-	WifiHost = cyw4343w.New[sdio.SDIO]()
+	WifiHost = cyw4343w.New[sdio.SDIO, Cache]()
 	UART     = uart.UART1
 )
 
 func init() {
 	// Prevent SysTick from driving timers.
 	runtime.SysTickCanWake = false
-
-	hal.ConfigureClocks()
 
 	os.Stdout = &runtime.Semihosting
 
@@ -97,6 +98,10 @@ func init() {
 }
 
 func main() {
+	fmt.Println("Starting...")
+	fmt.Println("Configuring peripherals...")
+	ctx := context.Background()
+
 	LEDR.SetMode(pin.Output)
 	LEDB.SetMode(pin.Output)
 	LEDG.SetMode(pin.Output)
@@ -148,11 +153,20 @@ func main() {
 		busyLoop()
 	}
 
-	err = WifiHost.Configure(cyw4343w.Config[sdio.SDIO]{
+	fmt.Println("Done configuring peripherals")
+	fmt.Println("Configuring Wi-Fi host...")
+
+	err = WifiHost.Configure(cyw4343w.Config[sdio.SDIO, Cache]{
 		Host:     SDIO1,
 		Firmware: firmware,
 		Nvram:    nvram,
 		Clm:      clm,
+
+		TxPool:      pool.MustNewFixed[Cache](txBacking[:], txSlotSize, 32),
+		RxPool:      pool.MustNewFixed[Cache](rxBacking[:], rxSlotSize, 32),
+		ControlPool: pool.MustNewFixed[Cache](ctrlBacking[:], ctrlSlotSize, 32),
+
+		//Debug: true,
 	})
 
 	if err != nil {
@@ -160,6 +174,9 @@ func main() {
 		errorState()
 		busyLoop()
 	}
+
+	fmt.Println("Done configuring Wi-Fi host")
+	fmt.Println("Initializing Wi-Fi card...")
 
 	// Initialize the card.
 	err = WifiHost.InitializeCard()
@@ -184,7 +201,7 @@ func main() {
 		busyLoop()
 	}
 
-	err = SDIO1.SetClockFrequency(10_000_000)
+	err = SDIO1.SetClockFrequency(sdioFrequency)
 	if err != nil {
 		fmt.Printf("Error setting SDIO clock frequency: %v\n", err)
 		errorState()
@@ -199,6 +216,8 @@ func main() {
 		busyLoop()
 	}
 
+	fmt.Println("Done initializing Wi-Fi card")
+
 	// Start processing frames from the device.
 	go func() {
 		for {
@@ -210,22 +229,27 @@ func main() {
 	}()
 
 	// The CLM image needs to be loaded before any Wi-Fi/BLE functionality can be used.
+	fmt.Println("Loading CLM...")
 	err = WifiHost.LoadClm()
 	if err != nil {
 		fmt.Printf("Error loading CLM: %v\n", err)
 		errorState()
 		busyLoop()
 	}
+	fmt.Println("Done loading CLM")
 
 	// Bring up the WLAN interface.
+	fmt.Println("Bringing up Wi-Fi interface...")
 	err = WifiHost.Up()
 	if err != nil {
 		fmt.Printf("Error bringing up Wi-Fi interface: %v\n", err)
 		errorState()
 		busyLoop()
 	}
+	fmt.Println("Done bringing up Wi-Fi interface")
 
 	// Scan for Wi-Fi networks.
+	fmt.Println("Scanning for Wi-Fi networks...")
 	networks, err := WifiHost.ScanWifiNetworks()
 	if err != nil {
 		fmt.Printf("Error scanning for Wi-Fi networks: %v\n", err)
@@ -236,17 +260,19 @@ func main() {
 	for _, network := range networks {
 		_, _ = os.Stdout.WriteString(network + "\n")
 	}
-
-	use(networks)
+	fmt.Printf("Found %d networks\n", len(networks))
 
 	// Join a WPA2 network.
 	fmt.Printf("Joining WPA2 network...\n")
-	err = WifiHost.JoinWPA2("waj334", "bigbluehooters")
+	joinCtx, cancel := context.WithDeadline(ctx, time.Now().Add(30*time.Second))
+	err = WifiHost.JoinWPA2(joinCtx, ssid, passphrase)
 	if err != nil {
+		cancel()
 		fmt.Printf("Error joining WPA2 network: %v\n", err)
 		errorState()
 		busyLoop()
 	}
+	cancel()
 	fmt.Println("Joined!")
 
 	// Print the MAC address.
@@ -263,6 +289,7 @@ func main() {
 	// Register the WiFi driver as a net device to enable LWIP networking.
 	// DHCP will start automatically.
 	ni := net.RegisterNetDevice(WifiHost)
+	fmt.Println("Registered WiFi driver as net device")
 
 	// Wait for DHCP to assign an IP address.
 	fmt.Println("Waiting for IP address...")
@@ -275,7 +302,9 @@ func main() {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	// Dump google.com to Stdout.
+	fmt.Printf("\n\n\n\n")
+
+	// Dump http response to Stdout.
 	resp, err := http.Get("http://httpforever.com")
 	if err != nil {
 		fmt.Printf("GET error: %s\n", err)
@@ -294,6 +323,8 @@ func main() {
 
 	_ = resp.Body.Close()
 
+	fmt.Printf("\n\n\n\n")
+	fmt.Println("Done!")
 	goodState()
 	busyLoop()
 }
@@ -313,5 +344,3 @@ func goodState() {
 func busyLoop() {
 	select {}
 }
-
-func use(any) {}
