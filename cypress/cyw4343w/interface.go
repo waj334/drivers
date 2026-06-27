@@ -24,7 +24,7 @@ const (
 	wlanFunction      busFunctionType = 2
 
 	//defaultTimeout = 500 * time.Millisecond
-	defaultTimeout = 5000 * time.Second
+	defaultTimeout = 5000 * time.Millisecond
 	htTimeout      = 2500 * time.Millisecond
 
 	blockSize = 64
